@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Your Email | {{ site_name }}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #18181b;
+            background-color: #fafafa;
+            margin: 0;
+            padding: 0;
+        }
+        .wrapper {
+            width: 100%;
+            background-color: #fafafa;
+            padding: 40px 0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e4e4e7;
+        }
+        .header {
+            background-color: #18181b;
+            padding: 40px 20px;
+            text-align: center;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: 900;
+            letter-spacing: -0.05em;
+            color: #ffffff;
+            text-transform: uppercase;
+            margin: 0;
+        }
+        .logo-dot {
+            color: #ea580c;
+        }
+        .content {
+            padding: 40px;
+            color: #3f3f46;
+        }
+        h2 {
+            color: #18181b;
+            font-size: 24px;
+            font-weight: 800;
+            margin-top: 0;
+        }
+        .button-container {
+            text-align: center;
+            margin: 35px 0;
+        }
+        .button {
+            display: inline-block;
+            padding: 16px 32px;
+            background-color: #18181b;
+            color: #ffffff !important;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .warning-box {
+            background-color: #fef3c7;
+            border: 1px solid #fde68a;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #92400e;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .footer {
+            padding: 30px;
+            background-color: #f4f4f5;
+            text-align: center;
+            font-size: 12px;
+            color: #71717a;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <div class="container">
+            <div class="header">
+                <h1 class="logo">KYRIOS<span class="logo-dot">.</span></h1>
+            </div>
+            <div class="content">
+                <h2>Verify Your Email Address</h2>
+                <p>Hello <strong>{{ user.first_name|default:user.username }}</strong>,</p>
+                
+                <p>Thank you for joining <strong>{{ site_name }}</strong>! Please verify your email address to activate your account.</p>
+                
+                <div class="button-container">
+                    <a href="{{ verification_link }}" class="button">Verify Email Address</a>
+                </div>
+                
+                <div class="warning-box">
+                    ⚠️ This verification link will expire in {{ expiry_hours }} hours.
+                </div>
+                
+                <p>If the button doesn't work, copy and paste this link into your browser:</p>
+                <p><a href="{{ verification_link }}" style="color: #ea580c; word-break: break-all;">{{ verification_link }}</a></p>
+                
+                <p>If you didn't create an account with {{ site_name }}, please ignore this email.</p>
+                
+                <hr style="margin: 30px 0 20px; border: none; border-top: 1px solid #e4e4e7;">
+                
+                <p style="font-size: 13px;"><strong>Why verify?</strong></p>
+                <ul style="font-size: 13px;">
+                    <li>Secure your account</li>
+                    <li>Reset your password when needed</li>
+                    <li>Receive important account notifications</li>
+                </ul>
+            </div>
+            <div class="footer">
+                <p>&copy; {{ year }} {{ site_name }}. All rights reserved.</p>
+                <p>This is an automated message, please do not reply.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
