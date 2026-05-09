@@ -6,13 +6,14 @@ from apps.utils.decorators.auth import jwt_required, admin_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from apps.utils import bad_request, ok
-from .models import Subject, Course
+from .models import Subject, Course,CourseRegistration,DIFFICULTY_HIERARCHY
 from django.core.paginator import Paginator
 from .utils import serialize_course, serialize_subject
 from django.utils.text import slugify
 from django.db import transaction
-
-
+from django.utils import timezone
+from .utils import serialize_registration
+from apps.packages.models import Subscription
 # ─────────────────────────────────────────
 # SUBJECTS
 # ─────────────────────────────────────────
@@ -193,7 +194,7 @@ def delete_subject(request, id):
     if course_count > 0:
         return bad_request(
             f"Cannot delete subject with {course_count} course(s) attached. "
-            f"Deactivate it instead, or reassign/delete its courses first."
+            f"Deactivate it instead, or delete its courses first."
         )
 
     # 3. Store name for response before deletion
@@ -383,6 +384,7 @@ def create_course(request):
 @jwt_required
 @require_http_methods(["GET"])
 def list_courses(request):
+    
     is_admin = request.user.is_staff_member or request.user.is_admin
 
     try:
@@ -667,3 +669,262 @@ def bulk_course_action(request):
                 },
                 message=f"{updated_count} course(s) deactivated successfully"
             )
+            
+        
+
+
+def validate_and_register(user, course, subscription) -> tuple[CourseRegistration | None, str | None]:
+    """
+    Validates all package restrictions then creates a registration.
+    Returns (registration, None) on success.
+    Returns (None, error_message) on failure.
+
+    Checks in order:
+    1. Subscription is active
+    2. Course is active
+    3. Already registered
+    4. Difficulty level allowed by package
+    5. Course limit not exceeded
+    6. Subject accessible under package
+    """
+    
+
+    package = subscription.package
+
+    if not subscription.is_active:
+        return None, "Your subscription is not active"
+
+    if course.status != Course.Status.ACTIVE:
+        return None, "This course is not available"
+
+    already_registered = CourseRegistration.objects.filter(
+        user=user,
+        course=course,
+        status=CourseRegistration.Status.ACTIVE,
+    ).exists()
+
+    if already_registered:
+        return None, "You are already registered for this course"
+
+
+    course_level  = DIFFICULTY_HIERARCHY.get(course.difficulty, 0)
+    allowed_level = DIFFICULTY_HIERARCHY.get(package.max_difficulty, 0)
+
+    if course_level > allowed_level:
+        return None, (
+            f"Your '{package.name}' package only allows up to "
+            f"'{package.get_max_difficulty_display()}' courses. "
+            f"This course is '{course.get_difficulty_display()}'. "
+            f"Upgrade your package to access this course."
+        )
+
+    if not package.is_unlimited and package.max_courses is not None:
+        current_count = CourseRegistration.objects.filter(
+            user=user,
+            subscription=subscription,
+            status__in=[
+                CourseRegistration.Status.ACTIVE,
+                CourseRegistration.Status.COMPLETED,
+            ]
+        ).count()
+
+        if current_count >= package.max_courses:
+            return None, (
+                f"Your '{package.name}' package allows a maximum of "
+                f"{package.max_courses} course(s). "
+                f"You have registered for {current_count}. "
+                f"Drop a course or upgrade your package."
+            )
+            
+    
+
+    if package.subjects.exists():
+        allowed_subjects = package.subjects.values_list("id", flat=True)
+        if course.subject_id not in allowed_subjects:
+            return None, (
+                f"Your '{package.name}' package does not include "
+                f"the '{course.subject.name}' subject. "
+                f"Upgrade your package to access this course."
+            )
+
+    with transaction.atomic():
+        registration = CourseRegistration.objects.create(
+            user=user,
+            course=course,
+            subscription=subscription,
+        )
+
+    return registration, None
+
+
+
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["POST"])
+def register_for_course(request):
+    
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return bad_request("Invalid request body")
+
+    course_id = data.get("course_id", "").strip()
+    if not course_id:
+        return bad_request("course_id is required")
+
+    try:
+        course = Course.objects.select_related("subject").get(id=course_id)
+    except Course.DoesNotExist:
+        return bad_request("Course not found")
+    except Exception:
+        return bad_request("Invalid course ID format")
+
+    # 3. Fetch user's active subscription
+    try:
+        
+        subscription = Subscription.objects.select_related("package").prefetch_related("package__subjects",
+).get(user=request.user,status__in=["active", "trial"])
+    except Subscription.DoesNotExist:
+        return bad_request(
+            "You need an active subscription to register for courses."
+        )
+
+    # 4. Run all validation and create registration
+    print("Hereeeeeeeee")
+    registration, error = validate_and_register(
+        user=request.user,
+        course=course,
+        subscription=subscription,
+    )
+
+    if error:
+        return bad_request(error)
+
+    return ok(
+        data=serialize_registration(registration),
+        message=f"Successfully registered for '{course.name}'"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["POST"])
+def drop_course(request, id):
+    """Student drops a course they are registered for."""
+
+    try:
+        registration = CourseRegistration.objects.select_related(
+            "course"
+        ).get(id=id, user=request.user)
+    except CourseRegistration.DoesNotExist:
+        return bad_request("Registration not found")
+    except Exception:
+        return bad_request("Invalid registration ID format")
+
+    if registration.status != CourseRegistration.Status.ACTIVE:
+        return bad_request(f"Cannot drop a course with status '{registration.status}'")
+
+    registration.status     = CourseRegistration.Status.DROPPED
+    registration.dropped_at = timezone.now()
+    registration.save(update_fields=["status", "dropped_at"])
+
+    return ok(
+        data=serialize_registration(registration),
+        message=f"Successfully dropped '{registration.course.name}'"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["GET"])
+def my_registrations(request):
+    """Returns all courses the current user is registered for."""
+
+    try:
+        page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
+        page_number = max(1, int(request.GET.get("page", 1)))
+    except ValueError:
+        return bad_request("page and page_size must be valid integers")
+
+    queryset = CourseRegistration.objects.select_related(
+        "course",
+        "course__subject",
+    ).filter(user=request.user).order_by("-enrolled_at")
+
+    # Filter by status if provided
+    status_filter = request.GET.get("status", "all")
+    if status_filter not in [*CourseRegistration.Status.values, "all"]:
+        return bad_request(f"Invalid status. Must be one of: {CourseRegistration.Status.values}")
+    if status_filter != "all":
+        queryset = queryset.filter(status=status_filter)
+
+    paginator = Paginator(queryset, page_size)
+    page      = paginator.get_page(page_number)
+
+    return ok(
+        data={
+            "results": [serialize_registration(r) for r in page.object_list],
+            "pagination": {
+                "total":         paginator.count,
+                "total_pages":   paginator.num_pages,
+                "current_page":  page.number,
+                "page_size":     page_size,
+                "has_next":      page.has_next(),
+                "has_previous":  page.has_previous(),
+                "next_page":     page.next_page_number() if page.has_next() else None,
+                "previous_page": page.previous_page_number() if page.has_previous() else None,
+            }
+        },
+        message="Registrations retrieved successfully"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@admin_required
+@require_http_methods(["GET"])
+def admin_list_registrations(request):
+    """Admin view — all registrations across all users."""
+
+    try:
+        page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
+        page_number = max(1, int(request.GET.get("page", 1)))
+    except ValueError:
+        return bad_request("page and page_size must be valid integers")
+
+    queryset = CourseRegistration.objects.select_related(
+        "user", "course", "course__subject", "subscription__package"
+    ).order_by("-enrolled_at")
+
+    status_filter = request.GET.get("status", "all")
+    if status_filter not in [*CourseRegistration.Status.values, "all"]:
+        return bad_request(f"Invalid status. Must be one of: {CourseRegistration.Status.values}")
+    if status_filter != "all":
+        queryset = queryset.filter(status=status_filter)
+
+    course_id = request.GET.get("course")
+    if course_id:
+        queryset = queryset.filter(course__id=course_id)
+
+    paginator = Paginator(queryset, page_size)
+    page      = paginator.get_page(page_number)
+
+    return ok(
+        data={
+            "results": [serialize_registration(r, is_admin=True) for r in page.object_list],
+            "pagination": {
+                "total":         paginator.count,
+                "total_pages":   paginator.num_pages,
+                "current_page":  page.number,
+                "page_size":     page_size,
+                "has_next":      page.has_next(),
+                "has_previous":  page.has_previous(),
+                "next_page":     page.next_page_number() if page.has_next() else None,
+                "previous_page": page.previous_page_number() if page.has_previous() else None,
+            }
+        },
+        message="Registrations listed successfully"
+    )

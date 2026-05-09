@@ -51,7 +51,8 @@ INSTALLED_APPS = [
     'apps.accounts',
     'apps.core',
     'apps.utils',
-    'apps.subjects'
+    'apps.subjects',
+    'apps.packages'
     
 ]
 

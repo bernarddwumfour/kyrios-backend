@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from django.utils.text import slugify
+from django.conf import settings
 
 
 # ─────────────────────────────────────────
@@ -101,6 +102,84 @@ class Course(TimeStampedModel):
         super().save(*args, **kwargs)
 
 
+# courses/models.py
+
+
+
+# Difficulty hierarchy used for package validation
+DIFFICULTY_HIERARCHY = {
+    "beginner":     1,
+    "intermediate": 2,
+    "advanced":     3,
+}
+
+
+class CourseRegistration(TimeStampedModel):
+
+    class Status(models.TextChoices):
+        ACTIVE    = "active",    "Active"
+        DROPPED   = "dropped",   "Dropped"
+        COMPLETED = "completed", "Completed"
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    user         = models.ForeignKey(
+                    settings.AUTH_USER_MODEL,
+                    on_delete=models.RESTRICT,
+                    related_name="registrations"
+                )
+    course       = models.ForeignKey(
+                    Course,
+                    on_delete=models.RESTRICT,
+                    related_name="registrations"
+                )
+   
+    subscription = models.ForeignKey(
+                    "packages.Subscription",
+                    on_delete=models.RESTRICT,
+                    related_name="registrations",
+                    help_text="The subscription that granted access to this course."
+                )
+
+    status       = models.CharField(
+                    max_length=10,
+                    choices=Status.choices,
+                    default=Status.ACTIVE,
+                    db_index=True,
+                )
+
+    progress     = models.PositiveIntegerField(
+                    default=0,
+                    help_text="Completion percentage 0-100"
+                )
+
+    # Timestamps for lifecycle events
+    enrolled_at  = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    dropped_at   = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering     = ["-enrolled_at"]
+        verbose_name = "course registration"
+        verbose_name_plural = "course registrations"
+        constraints  = [
+            # A student can only register once per course
+            models.UniqueConstraint(
+                fields=["user", "course"],
+                name="unique_user_course_registration"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user} → {self.course.name} ({self.status})"
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == self.Status.ACTIVE
+
+    @property
+    def is_completed(self) -> bool:
+        return self.status == self.Status.COMPLETED
 # ─────────────────────────────────────────
 # MODULE
 # ─────────────────────────────────────────

@@ -4,6 +4,8 @@ from django.utils.translation import gettext_lazy as _
 import secrets
 import pyotp
 from django.utils import timezone
+# import uuid
+
 
 class User(AbstractUser):
     """
@@ -19,7 +21,9 @@ class User(AbstractUser):
         MALE = 'male', _('Male')
         FEMALE = 'female', _('Female')
         PREFER_NOT_TO_SAY = 'prefer_not_to_say', _('Prefer not to say')
+        
     
+    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     # Role field
     role = models.CharField(
         max_length=10,
@@ -96,6 +100,13 @@ class User(AbstractUser):
     mfa_secret = models.CharField(max_length=32, blank=True, null=True)
     mfa_email_verified = models.BooleanField(default=False)
     mfa_backup_codes = models.JSONField(default=list, blank=True)
+    
+    packages = models.ManyToManyField(
+        "packages.Package",
+        through="packages.Subscription",
+        related_name="subscribers",
+        blank=True,
+    )
     
     class Meta:
         db_table = 'users'

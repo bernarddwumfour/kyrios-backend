@@ -65,3 +65,40 @@ def serialize_course(course, include_modules=False, is_admin=False) -> dict:
         ]
 
     return data
+
+
+
+
+def serialize_registration(registration, is_admin=False) -> dict:
+    data = {
+        "id":          str(registration.id),
+        "course": {
+            "id":         str(registration.course.id),
+            "name":       registration.course.name,
+            "slug":       registration.course.slug,
+            "difficulty": registration.course.difficulty,
+            "duration":   registration.course.duration,
+            "subject": {
+                "id":   str(registration.course.subject.id),
+                "name": registration.course.subject.name,
+            }
+        },
+        "status":      registration.status,
+        "progress":    registration.progress,
+        "enrolled_at": registration.enrolled_at.isoformat(),
+        "completed_at": registration.completed_at.isoformat() if registration.completed_at else None,
+        "dropped_at":   registration.dropped_at.isoformat() if registration.dropped_at else None,
+    }
+
+    if is_admin:
+        data["user"] = {
+            "id":    str(registration.user.id),
+            "email": registration.user.email,
+            "name":  registration.user.get_full_name(),
+        }
+        data["subscription"] = {
+            "id":      str(registration.subscription.id),
+            "package": registration.subscription.package.name,
+        }
+
+    return data
