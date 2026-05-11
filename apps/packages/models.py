@@ -175,9 +175,11 @@ class Subscription(TimeStampedModel):
     class Status(models.TextChoices):
         TRIAL     = "trial",     "Trial"
         ACTIVE    = "active",    "Active"
+        GRACE     = "grace",     "Grace Period"  
         EXPIRED   = "expired",   "Expired"
         CANCELLED = "cancelled", "Cancelled"
         PAUSED    = "paused",    "Paused"
+
 
     class CancellationReason(models.TextChoices):
         TOO_EXPENSIVE  = "too_expensive",  "Too Expensive"
@@ -243,6 +245,16 @@ class Subscription(TimeStampedModel):
     ai_credits_used           = models.PositiveIntegerField(default=0)
     audio_minutes_used        = models.PositiveIntegerField(default=0)
     usage_cycle_started_at    = models.DateTimeField(auto_now_add=True)
+    
+    current_period_ends_at = models.DateTimeField(
+                                null=True, blank=True,
+                                help_text="When the current billing cycle ends."
+                            )
+
+    grace_period_ends_at   = models.DateTimeField(
+                                null=True, blank=True,
+                                help_text="Grace period ends 3 days after billing cycle ends."
+                            )
 
     class Meta:
         ordering     = ["-created_at"]
@@ -261,7 +273,31 @@ class Subscription(TimeStampedModel):
 
     @property
     def is_active(self) -> bool:
-        return self.status in [self.Status.ACTIVE, self.Status.TRIAL]
+        """
+        Active during trial, active status AND grace period.
+        Student keeps full access throughout grace period.
+        """
+        from django.utils import timezone
+        now = timezone.now()
+
+        if self.status in [self.Status.TRIAL, self.Status.ACTIVE]:
+            return True
+
+        # Grace period — full access maintained
+        if self.status == self.Status.GRACE:
+            if self.grace_period_ends_at and now <= self.grace_period_ends_at:
+                return True
+
+        return False
+
+    @property
+    def is_in_grace_period(self) -> bool:
+        from django.utils import timezone
+        return (
+            self.status == self.Status.GRACE and
+            self.grace_period_ends_at is not None and
+            timezone.now() <= self.grace_period_ends_at
+        )
 
     @property
     def is_on_trial(self) -> bool:

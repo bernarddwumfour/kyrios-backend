@@ -81,6 +81,14 @@ class Course(TimeStampedModel):
         null=True, blank=True,
         help_text="Estimated total duration in minutes"
     )
+    price       = models.DecimalField(
+                    max_digits=8,
+                    decimal_places=2,
+                    null=True,
+                    blank=True,
+                    help_text="One-time purchase price. Null means not available for purchase."
+                )
+    
     status      = models.CharField(
         max_length=10,
         choices=Status.choices,
@@ -100,6 +108,11 @@ class Course(TimeStampedModel):
         if not self.slug:
             self.slug = slugify(self.name)
         super().save(*args, **kwargs)
+        
+    @property
+    def is_purchasable(self) -> bool:
+        return self.price is not None and self.status == self.Status.ACTIVE
+
 
 
 # courses/models.py
@@ -148,10 +161,6 @@ class CourseRegistration(TimeStampedModel):
                     db_index=True,
                 )
 
-    progress     = models.PositiveIntegerField(
-                    default=0,
-                    help_text="Completion percentage 0-100"
-                )
 
     # Timestamps for lifecycle events
     enrolled_at  = models.DateTimeField(auto_now_add=True)
@@ -180,6 +189,110 @@ class CourseRegistration(TimeStampedModel):
     @property
     def is_completed(self) -> bool:
         return self.status == self.Status.COMPLETED
+    
+    
+    
+    price       = models.DecimalField(
+                    max_digits=8,
+                    decimal_places=2,
+                    null=True,
+                    blank=True,
+                    help_text="One-time purchase price. Null means not available for purchase."
+                )
+
+
+class CoursePurchase(TimeStampedModel):
+    """
+    One-time course purchase.
+    Gives permanent access independent of subscription.
+    Does NOT count toward subscription course limit.
+    If purchased while accessing via subscription,
+    the subscription slot is automatically freed.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE      = "active",      "Active"
+        DEACTIVATED = "deactivated", "Deactivated"
+
+    id                   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user                 = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.RESTRICT, related_name="course_purchases")
+    course               = models.ForeignKey(Course, on_delete=models.RESTRICT, related_name="purchases")
+
+    # Snapshot price at time of purchase — never changes even if course price changes
+    price_paid           = models.DecimalField(max_digits=8, decimal_places=2)
+    payment_reference    = models.CharField(max_length=200, blank=True, default="")
+
+    status               = models.CharField(
+                            max_length=12,
+                            choices=Status.choices,
+                            default=Status.ACTIVE,
+                            db_index=True,
+                        )
+
+    # Student can deactivate for themselves
+    # Excluded from completion rate, progress stats, dashboard
+    deactivated_by_student = models.BooleanField(default=False)
+
+    # Admin can deactivate independently
+    deactivated_by_admin   = models.BooleanField(default=False)
+
+    purchased_at         = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering     = ["-purchased_at"]
+        verbose_name = "course purchase"
+        verbose_name_plural = "course purchases"
+        constraints  = [
+            # A student can only purchase a course once
+            models.UniqueConstraint(
+                fields=["user", "course"],
+                name="unique_user_course_purchase"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user} purchased {self.course.name}"
+
+    @property
+    def is_accessible(self) -> bool:
+        """Purchase grants access unless BOTH admin and student deactivate."""
+        return self.status == self.Status.ACTIVE
+
+
+class CourseProgress(TimeStampedModel):
+    """
+    Unified progress tracking — shared across subscription access
+    AND purchased access. Progress always carries over regardless
+    of how the student is accessing the course.
+    """
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user         = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.RESTRICT, related_name="progress")
+    course       = models.ForeignKey(Course, on_delete=models.RESTRICT, related_name="progress")
+
+    # 0-100 percentage
+    progress     = models.PositiveIntegerField(default=0)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "course progress"
+        verbose_name_plural = "course progress"
+        constraints  = [
+            # One progress record per user per course — always
+            models.UniqueConstraint(
+                fields=["user", "course"],
+                name="unique_user_course_progress"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user} — {self.course.name} ({self.progress}%)"
+
+    @property
+    def is_completed(self) -> bool:
+        return self.completed_at is not None
+
+
 # ─────────────────────────────────────────
 # MODULE
 # ─────────────────────────────────────────

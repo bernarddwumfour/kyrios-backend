@@ -6,14 +6,16 @@ from apps.utils.decorators.auth import jwt_required, admin_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from apps.utils import bad_request, ok
-from .models import Subject, Course,CourseRegistration,DIFFICULTY_HIERARCHY
+from .models import Subject, Course,CourseRegistration,CoursePurchase,CourseProgress,DIFFICULTY_HIERARCHY
 from django.core.paginator import Paginator
 from .utils import serialize_course, serialize_subject
 from django.utils.text import slugify
 from django.db import transaction
 from django.utils import timezone
-from .utils import serialize_registration
+from .utils import serialize_registration,serialize_purchase,serialize_progress
 from apps.packages.models import Subscription
+from .access import get_course_access
+
 # ─────────────────────────────────────────
 # SUBJECTS
 # ─────────────────────────────────────────
@@ -308,7 +310,6 @@ def bulk_subject_action(request):
 # ─────────────────────────────────────────
 # COURSES
 # ─────────────────────────────────────────
-
 @csrf_exempt
 @jwt_required
 @admin_required
@@ -323,7 +324,7 @@ def create_course(request):
     except json.JSONDecodeError:
         return bad_request("Invalid JSON body")
 
-    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration"}
+    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration", "price"}
     required_fields = {"name", "difficulty", "subject"}
     received_fields = set(data.keys())
 
@@ -352,6 +353,15 @@ def create_course(request):
         except (ValueError, TypeError):
             return bad_request("Duration must be a positive integer (minutes)")
 
+    price = data.get("price")
+    if price is not None:
+        try:
+            price = float(price)
+            if price <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            return bad_request("Price must be a positive number e.g. 9.99")
+
     try:
         subject = Subject.objects.get(id=data["subject"])
     except Subject.DoesNotExist:
@@ -367,15 +377,16 @@ def create_course(request):
             "difficulty":  difficulty,
             "subject":     subject,
             "duration":    duration,
+            "price":       price,          
         }
     )
 
     if not created:
         return bad_request("A course with this name already exists")
 
-    course = Course.objects.select_related("subject").get(id=course.id)
-
-    # course = Course.objects.select_related("subject").prefetch_related("modules").get(id=course.id)
+    course = Course.objects.select_related("subject") \
+                           .prefetch_related("modules") \
+                           .get(id=course.id)
 
     return ok(data=serialize_course(course, is_admin=True), message="Course created successfully")
 
@@ -384,7 +395,6 @@ def create_course(request):
 @jwt_required
 @require_http_methods(["GET"])
 def list_courses(request):
-    
     is_admin = request.user.is_staff_member or request.user.is_admin
 
     try:
@@ -393,9 +403,7 @@ def list_courses(request):
     except ValueError:
         return bad_request("page and page_size must be valid integers")
 
-    # queryset = Course.objects.select_related("subject").prefetch_related("modules").order_by("name")
     queryset = Course.objects.select_related("subject").order_by("name")
-
 
     if is_admin:
         status_filter = request.GET.get("status", "all")
@@ -408,13 +416,29 @@ def list_courses(request):
             status=Course.Status.ACTIVE,
             subject__status=Subject.Status.ACTIVE,
         )
+    
+    
+
+    is_purchasable = request.GET.get("is_purchasable", "").lower()
+    if is_purchasable == "true":
+        queryset = queryset.filter(price__isnull=False)
+    elif is_purchasable == "false":
+        queryset = queryset.filter(price__isnull=True)
+
+    difficulty = request.GET.get("difficulty", "").strip()
+    if difficulty:
+        if difficulty not in Course.Difficulty.values:
+            return bad_request(f"Invalid difficulty. Must be one of: {Course.Difficulty.values}")
+        queryset = queryset.filter(difficulty=difficulty)
 
     paginator = Paginator(queryset, page_size)
     page      = paginator.get_page(page_number)
 
     return ok(
         data={
-            "results": [serialize_course(c, is_admin=is_admin) for c in page.object_list],
+            "results": [
+                serialize_course(c, is_admin=is_admin) for c in page.object_list
+            ],
             "pagination": {
                 "total":         paginator.count,
                 "total_pages":   paginator.num_pages,
@@ -434,7 +458,7 @@ def list_courses(request):
 @jwt_required
 @require_http_methods(["GET"])
 def course_detail(request, id):
-    is_admin = request.user.is_staff_member or request.user.is_admin
+    is_admin = request.user.is_staff
 
     try:
         course = Course.objects.select_related("subject") \
@@ -452,7 +476,12 @@ def course_detail(request, id):
             return bad_request("Course not found")
 
     return ok(
-        data=serialize_course(course, include_modules=True, is_admin=is_admin),
+        data=serialize_course(
+            course,
+            include_modules=True,
+            is_admin=is_admin,
+            user=request.user,
+        ),
         message="Course retrieved successfully"
     )
 
@@ -464,9 +493,7 @@ def course_detail(request, id):
 def update_course(request, id):
 
     try:
-        # course = Course.objects.select_related("subject").prefetch_related("modules").get(id=id)
         course = Course.objects.select_related("subject").get(id=id)
-
     except Course.DoesNotExist:
         return bad_request("Course not found")
     except Exception:
@@ -480,7 +507,7 @@ def update_course(request, id):
     except json.JSONDecodeError:
         return bad_request("Invalid request body")
 
-    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration"}
+    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration", "price"}
     received_fields = set(data.keys())
 
     extra = received_fields - allowed_fields
@@ -525,6 +552,19 @@ def update_course(request, id):
                 return bad_request("Duration must be a positive integer (minutes)")
         course.duration = duration
 
+    if "price" in data:
+        price = data["price"]
+        if price is None:
+            course.price = None
+        else:
+            try:
+                price = float(price)
+                if price <= 0:
+                    raise ValueError
+                course.price = price
+            except (ValueError, TypeError):
+                return bad_request("Price must be a positive number e.g. 9.99")
+
     if "subject" in data:
         try:
             new_subject = Subject.objects.get(id=data["subject"])
@@ -536,9 +576,7 @@ def update_course(request, id):
 
     course.save()
 
-    # course = Course.objects.select_related("subject").prefetch_related("modules").get(id=course.id)
     course = Course.objects.select_related("subject").get(id=course.id)
-
 
     return ok(data=serialize_course(course, is_admin=True), message="Course updated successfully")
 
@@ -549,23 +587,35 @@ def update_course(request, id):
 @require_http_methods(["DELETE"])
 def delete_course(request, id):
 
-    # 1. Fetch course
     try:
-        course = Course.objects.get(id=id)
+        course = Course.objects.prefetch_related("modules", "registrations", "purchases").get(id=id)
     except Course.DoesNotExist:
         return bad_request("Course not found")
     except Exception:
         return bad_request("Invalid course ID format")
 
-    # 2. Safety check — block deletion if course has modules
-    # module_count = course.modules.count()
-    # if module_count > 0:
-    #     return bad_request(
-    #         f"Cannot delete course with {module_count} module(s) attached. "
-    #         f"Deactivate it instead, or delete its modules first."
-    #     )
+    if course.modules.count() > 0:
+        return bad_request(
+            f"Cannot delete course with {course.modules.count()} module(s). "
+            f"Delete its modules first."
+        )
 
-    # 3. Store name before deletion
+    purchase_count = course.purchases.count()
+    if purchase_count > 0:
+        return bad_request(
+            f"Cannot delete course with {purchase_count} purchase(s). "
+            f"Deactivate the course instead."
+        )
+
+    active_registrations = course.registrations.filter(
+        status=CourseRegistration.Status.ACTIVE
+    ).count()
+    if active_registrations > 0:
+        return bad_request(
+            f"Cannot delete course with {active_registrations} active registration(s). "
+            f"Deactivate the course instead."
+        )
+
     course_name = course.name
     course.delete()
 
@@ -758,13 +808,10 @@ def validate_and_register(user, course, subscription) -> tuple[CourseRegistratio
 
 
 
-
-
 @csrf_exempt
 @jwt_required
 @require_http_methods(["POST"])
 def register_for_course(request):
-    
 
     try:
         data = json.loads(request.body)
@@ -782,18 +829,28 @@ def register_for_course(request):
     except Exception:
         return bad_request("Invalid course ID format")
 
-    # 3. Fetch user's active subscription
-    try:
-        
-        subscription = Subscription.objects.select_related("package").prefetch_related("package__subjects",
-).get(user=request.user,status__in=["active", "trial"])
-    except Subscription.DoesNotExist:
+    already_purchased = CoursePurchase.objects.filter(
+        user=request.user,
+        course=course,
+        status=CoursePurchase.Status.ACTIVE,
+    ).exists()
+
+    if already_purchased:
         return bad_request(
-            "You need an active subscription to register for courses."
+            "You have already purchased this course. "
+            "You have permanent access — no need to register."
         )
 
-    # 4. Run all validation and create registration
-    print("Hereeeeeeeee")
+    try:
+        subscription = Subscription.objects.select_related("package") \
+                                           .prefetch_related("package__subjects") \
+                                           .get(
+                                               user=request.user,
+                                               status__in=["active", "trial", "grace"]
+                                           )
+    except Subscription.DoesNotExist:
+        return bad_request("You need an active subscription to register for courses.")
+
     registration, error = validate_and_register(
         user=request.user,
         course=course,
@@ -802,6 +859,12 @@ def register_for_course(request):
 
     if error:
         return bad_request(error)
+
+    CourseProgress.objects.get_or_create(
+        user=request.user,
+        course=course,
+        defaults={"progress": 0}
+    )
 
     return ok(
         data=serialize_registration(registration),
@@ -813,12 +876,11 @@ def register_for_course(request):
 @jwt_required
 @require_http_methods(["POST"])
 def drop_course(request, id):
-    """Student drops a course they are registered for."""
 
     try:
-        registration = CourseRegistration.objects.select_related(
-            "course"
-        ).get(id=id, user=request.user)
+        registration = CourseRegistration.objects.select_related("course").get(
+            id=id, user=request.user
+        )
     except CourseRegistration.DoesNotExist:
         return bad_request("Registration not found")
     except Exception:
@@ -827,7 +889,7 @@ def drop_course(request, id):
     if registration.status != CourseRegistration.Status.ACTIVE:
         return bad_request(f"Cannot drop a course with status '{registration.status}'")
 
-    registration.status     = CourseRegistration.Status.DROPPED
+    registration.status    = CourseRegistration.Status.DROPPED
     registration.dropped_at = timezone.now()
     registration.save(update_fields=["status", "dropped_at"])
 
@@ -841,7 +903,6 @@ def drop_course(request, id):
 @jwt_required
 @require_http_methods(["GET"])
 def my_registrations(request):
-    """Returns all courses the current user is registered for."""
 
     try:
         page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
@@ -849,15 +910,14 @@ def my_registrations(request):
     except ValueError:
         return bad_request("page and page_size must be valid integers")
 
-    queryset = CourseRegistration.objects.select_related(
-        "course",
-        "course__subject",
-    ).filter(user=request.user).order_by("-enrolled_at")
-
-    # Filter by status if provided
     status_filter = request.GET.get("status", "all")
     if status_filter not in [*CourseRegistration.Status.values, "all"]:
         return bad_request(f"Invalid status. Must be one of: {CourseRegistration.Status.values}")
+
+    queryset = CourseRegistration.objects.select_related(
+        "course", "course__subject",
+    ).filter(user=request.user).order_by("-enrolled_at")
+
     if status_filter != "all":
         queryset = queryset.filter(status=status_filter)
 
@@ -887,7 +947,6 @@ def my_registrations(request):
 @admin_required
 @require_http_methods(["GET"])
 def admin_list_registrations(request):
-    """Admin view — all registrations across all users."""
 
     try:
         page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
@@ -927,4 +986,273 @@ def admin_list_registrations(request):
             }
         },
         message="Registrations listed successfully"
+    )
+    
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["POST"])
+def purchase_course(request):
+    """
+    One-time course purchase.
+
+    1. Validates course is purchasable
+    2. Checks not already purchased
+    3. Creates purchase
+    4. If student had subscription registration for this course,
+       automatically frees the subscription slot
+    5. Progress is untouched — carries over
+    """
+    
+    print("hereeee")
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return bad_request("Invalid request body")
+
+    # 1. Validate course_id
+    course_id = data.get("course_id", "").strip()
+    if not course_id:
+        return bad_request("course_id is required")
+
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return bad_request("Course not found")
+    except Exception:
+        return bad_request("Invalid course ID format")
+
+    # 2. Check course is purchasable
+    if not course.is_purchasable:
+        return bad_request("This course is not available for purchase")
+
+    # 3. Check not already purchased
+    already_purchased = CoursePurchase.objects.filter(
+        user=request.user,
+        course=course,
+    ).exists()
+
+    if already_purchased:
+        return bad_request(
+            "You have already purchased this course. "
+            "Check your purchased courses."
+        )
+
+    # 4. Validate payment reference
+    payment_reference = data.get("payment_reference", "").strip()
+    if not payment_reference:
+        return bad_request("payment_reference is required")
+
+    # 5. Create purchase + free subscription slot if applicable
+    with transaction.atomic():
+
+        # Create the purchase
+        purchase = CoursePurchase.objects.create(
+            user=request.user,
+            course=course,
+            price_paid=course.price,      # snapshot current price
+            payment_reference=payment_reference,
+        )
+
+        # ✅ Free subscription slot if student was accessing
+        # this course via subscription
+        freed_slot = False
+        existing_registration = CourseRegistration.objects.filter(
+            user=request.user,
+            course=course,
+            status=CourseRegistration.Status.ACTIVE,
+        ).first()
+
+        if existing_registration:
+            # Delete the registration — slot is now free
+            existing_registration.delete()
+            freed_slot = True
+
+        # ✅ Ensure CourseProgress exists — preserves any existing progress
+        CourseProgress.objects.get_or_create(
+            user=request.user,
+            course=course,
+            defaults={"progress": 0}
+        )
+
+    return ok(
+        data={
+            **serialize_purchase(purchase),
+            "slot_freed": freed_slot,
+        },
+        message=(
+            f"Successfully purchased '{course.name}'. "
+            + ("A subscription slot has been freed." if freed_slot else "")
+        ).strip()
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["PATCH"])
+def deactivate_purchase(request, id):
+    """
+    Student deactivates a purchased course from their dashboard.
+    Course is still owned — just excluded from stats.
+    """
+
+    try:
+        purchase = CoursePurchase.objects.select_related("course").get(
+            id=id,
+            user=request.user,
+        )
+    except CoursePurchase.DoesNotExist:
+        return bad_request("Purchase not found")
+    except Exception:
+        return bad_request("Invalid purchase ID format")
+
+    if purchase.status == CoursePurchase.Status.DEACTIVATED:
+        return bad_request("This course is already deactivated")
+
+    purchase.deactivated_by_student = True
+    purchase.status                 = CoursePurchase.Status.DEACTIVATED
+    purchase.save(update_fields=["deactivated_by_student", "status"])
+
+    return ok(
+        data=serialize_purchase(purchase),
+        message=f"'{purchase.course.name}' has been removed from your dashboard"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["PATCH"])
+def reactivate_purchase(request, id):
+    """Student reactivates a previously deactivated purchase."""
+
+    try:
+        purchase = CoursePurchase.objects.select_related("course").get(
+            id=id,
+            user=request.user,
+        )
+    except CoursePurchase.DoesNotExist:
+        return bad_request("Purchase not found")
+    except Exception:
+        return bad_request("Invalid purchase ID format")
+
+    if purchase.status == CoursePurchase.Status.ACTIVE:
+        return bad_request("This course is already active")
+
+    # Admin deactivation takes priority —
+    # student cannot reactivate an admin-deactivated purchase
+    if purchase.deactivated_by_admin:
+        return bad_request("This course has been deactivated by an administrator")
+
+    purchase.deactivated_by_student = False
+    purchase.status                 = CoursePurchase.Status.ACTIVE
+    purchase.save(update_fields=["deactivated_by_student", "status"])
+
+    return ok(
+        data=serialize_purchase(purchase),
+        message=f"'{purchase.course.name}' has been restored to your dashboard"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["GET"])
+def my_purchases(request):
+    """Returns all courses the current user has purchased."""
+
+    try:
+        page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
+        page_number = max(1, int(request.GET.get("page", 1)))
+    except ValueError:
+        return bad_request("page and page_size must be valid integers")
+
+    # Default to active only — students see active purchases on dashboard
+    include_deactivated = request.GET.get("include_deactivated", "false").lower() == "true"
+
+    queryset = CoursePurchase.objects.select_related(
+        "course", "course__subject"
+    ).filter(user=request.user).order_by("-purchased_at")
+
+    if not include_deactivated:
+        queryset = queryset.filter(status=CoursePurchase.Status.ACTIVE)
+
+    paginator = Paginator(queryset, page_size)
+    page      = paginator.get_page(page_number)
+
+    return ok(
+        data={
+            "results": [serialize_purchase(p) for p in page.object_list],
+            "pagination": {
+                "total":         paginator.count,
+                "total_pages":   paginator.num_pages,
+                "current_page":  page.number,
+                "page_size":     page_size,
+                "has_next":      page.has_next(),
+                "has_previous":  page.has_previous(),
+                "next_page":     page.next_page_number() if page.has_next() else None,
+                "previous_page": page.previous_page_number() if page.has_previous() else None,
+            }
+        },
+        message="Purchased courses retrieved successfully"
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(["PATCH"])
+def update_progress(request, course_id):
+    """
+    Update student's progress on a course.
+    Works for both subscription and purchased access.
+    """
+
+    # 1. Verify student has access
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return bad_request("Course not found")
+
+    access = get_course_access(request.user, course)
+    if not access["has_access"]:
+        return bad_request("You do not have access to this course")
+
+    # 2. Parse and validate progress value
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return bad_request("Invalid request body")
+
+    try:
+        progress = int(data.get("progress", -1))
+        if not (0 <= progress <= 100):
+            raise ValueError
+    except (ValueError, TypeError):
+        return bad_request("progress must be an integer between 0 and 100")
+
+    # 3. Update or create progress record
+    course_progress, _ = CourseProgress.objects.get_or_create(
+        user=request.user,
+        course=course,
+        defaults={"progress": 0}
+    )
+
+    # Progress can only go forward — never backward
+    if progress <= course_progress.progress:
+        return bad_request(
+            f"Progress cannot go backward. "
+            f"Current progress is {course_progress.progress}%"
+        )
+
+    course_progress.progress = progress
+
+    # Mark completed
+    if progress == 100 and not course_progress.completed_at:
+        course_progress.completed_at = timezone.now()
+
+    course_progress.save(update_fields=["progress", "completed_at"])
+
+    return ok(
+        data=serialize_progress(course_progress),
+        message="Progress updated successfully"
     )

@@ -14,11 +14,10 @@ urlpatterns = [
     path("courses/",                        views.list_courses,       name="list_courses"),
     path("courses/create/",                views.create_course,      name="create_course"),
     path("courses/bulk-action/",                  views.bulk_course_action,  name="bulk_course_action"),
-    path("courses/<str:id>/",              views.course_detail,      name="course_detail"),
     path("courses/<str:id>/update/",       views.update_course,      name="update_course"),
     path("courses/<str:id>/delete/",       views.delete_course,      name="delete_course"),
     
-     path("<str:id>/",             views.subject_detail,     name="subject_detail"),
+    path("<str:id>/",             views.subject_detail,     name="subject_detail"),
      
     # Registration — Student
     path("courses/registrations/register/",        views.register_for_course,       name="register_for_course"),
@@ -27,5 +26,16 @@ urlpatterns = [
 
     # Registration — Admin
     path("courses/registrations/",                 views.admin_list_registrations,  name="admin_list_registrations"),
+    
+    # Purchases
+    path("courses/purchases/",                          views.my_purchases,         name="my_purchases"),
+    path("courses/purchases/buy/",                      views.purchase_course,      name="purchase_course"),
+    path("courses/purchases/<str:id>/deactivate/",      views.deactivate_purchase,  name="deactivate_purchase"),
+    path("courses/purchases/<str:id>/reactivate/",      views.reactivate_purchase,  name="reactivate_purchase"),
 
+    # Progress
+    path("courses/progress/<str:course_id>/update/",    views.update_progress,      name="update_progress"),
+    
+    path("courses/<str:id>/",              views.course_detail,      name="course_detail"),
+    
 ]
