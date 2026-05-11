@@ -392,11 +392,13 @@ def create_course(request):
 
 
 @csrf_exempt
-@jwt_required
+# @jwt_required
 @require_http_methods(["GET"])
 def list_courses(request):
-    is_admin = request.user.is_staff_member or request.user.is_admin
-
+    is_admin =False   
+    if request.user.is_authenticated:
+        is_admin = request.user.is_staff_member or request.user.is_admin
+        
     try:
         page_size   = max(1, min(int(request.GET.get("page_size", 10)), 100))
         page_number = max(1, int(request.GET.get("page", 1)))
@@ -416,6 +418,7 @@ def list_courses(request):
             status=Course.Status.ACTIVE,
             subject__status=Subject.Status.ACTIVE,
         )
+        
     
     
 
