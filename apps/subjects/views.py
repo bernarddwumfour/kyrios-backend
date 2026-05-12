@@ -458,15 +458,15 @@ def list_courses(request):
 
 
 @csrf_exempt
-@jwt_required
+# @jwt_required
 @require_http_methods(["GET"])
 def course_detail(request, id):
+    print("Here")
     is_admin = request.user.is_staff
+    
 
     try:
-        course = Course.objects.select_related("subject") \
-                               .prefetch_related("modules") \
-                               .get(id=id)
+        course = Course.objects.select_related("subject").get(id=id)
     except Course.DoesNotExist:
         return bad_request("Course not found")
     except Exception:
@@ -481,7 +481,7 @@ def course_detail(request, id):
     return ok(
         data=serialize_course(
             course,
-            include_modules=True,
+            include_modules=False,
             is_admin=is_admin,
             user=request.user,
         ),
