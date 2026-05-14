@@ -54,6 +54,14 @@ class Subject(TimeStampedModel):
 # ─────────────────────────────────────────
 # COURSE
 # ─────────────────────────────────────────
+# courses/models.py
+
+DIFFICULTY_HIERARCHY = {
+    "beginner":     1,
+    "intermediate": 2,
+    "advanced":     3,
+}
+
 
 class Course(TimeStampedModel):
 
@@ -68,33 +76,37 @@ class Course(TimeStampedModel):
 
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     subject     = models.ForeignKey(Subject, on_delete=models.RESTRICT, related_name="courses")
-    name        = models.CharField(max_length=100, unique=True, help_text="e.g. Introduction to Algebra")
+    name        = models.CharField(max_length=100, unique=True)
     slug        = models.SlugField(max_length=120, unique=True, blank=True)
     description = models.TextField(blank=True, default="")
     difficulty  = models.CharField(
-        max_length=12,
-        choices=Difficulty.choices,
-        default=Difficulty.BEGINNER,
-        db_index=True,
-    )
-    duration    = models.PositiveIntegerField(
-        null=True, blank=True,
-        help_text="Estimated total duration in minutes"
-    )
-    price       = models.DecimalField(
-                    max_digits=8,
-                    decimal_places=2,
-                    null=True,
-                    blank=True,
-                    help_text="One-time purchase price. Null means not available for purchase."
+                    max_length=12,
+                    choices=Difficulty.choices,
+                    default=Difficulty.BEGINNER,
+                    db_index=True,
                 )
-    
+    duration    = models.PositiveIntegerField(null=True, blank=True)
+    price       = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     status      = models.CharField(
-        max_length=10,
-        choices=Status.choices,
-        default=Status.ACTIVE,
-        db_index=True,
-    )
+                    max_length=10,
+                    choices=Status.choices,
+                    default=Status.ACTIVE,
+                    db_index=True,
+                )
+
+    prerequisites = models.ManyToManyField(
+                        "self",
+                        blank=True,
+                        symmetrical=False,
+                        related_name="unlocks",
+                        help_text="Suggested courses to complete before this one."
+                    )
+
+    requirements = models.JSONField(
+                        default=list,
+                        blank=True,
+                        help_text="Text list of requirements shown to student before enrolling."
+                    )
 
     class Meta:
         ordering        = ["name"]
@@ -108,12 +120,10 @@ class Course(TimeStampedModel):
         if not self.slug:
             self.slug = slugify(self.name)
         super().save(*args, **kwargs)
-        
+
     @property
     def is_purchasable(self) -> bool:
         return self.price is not None and self.status == self.Status.ACTIVE
-
-
 
 # courses/models.py
 

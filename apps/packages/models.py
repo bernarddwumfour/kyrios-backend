@@ -15,25 +15,20 @@ class Package(TimeStampedModel):
         MONTHLY  = "monthly",  "Monthly"
         YEARLY   = "yearly",   "Yearly"
         LIFETIME = "lifetime", "Lifetime"
-        
-    
-    class VideoQuality(models.TextChoices):
-        SD  = "sd",  "Standard Definition (480p)"
-        HD  = "hd",  "High Definition (720p)"
-        FHD = "fhd", "Full HD (1080p)"
-            
-        
 
     class MaxDifficulty(models.TextChoices):
         BEGINNER     = "beginner",     "Beginner Only"
         INTERMEDIATE = "intermediate", "Up to Intermediate"
-        ADVANCED     = "advanced",     "Up to Advanced"
-        EXPERT     = "expert",     "All Levels"
+        ADVANCED     = "advanced",     "All Levels"
 
+    class VideoQuality(models.TextChoices):
+        SD  = "sd",  "Standard Definition (480p)"
+        HD  = "hd",  "High Definition (720p)"
+        FHD = "fhd", "Full HD (1080p)"
 
-
+    # ── Identity ──────────────────────────────────────────
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name        = models.CharField(max_length=100, unique=True, help_text="e.g. Basic, Pro, Enterprise")
+    name        = models.CharField(max_length=100, unique=True)
     slug        = models.SlugField(max_length=120, unique=True, blank=True)
     description = models.TextField(blank=True, default="")
     status      = models.CharField(
@@ -42,94 +37,81 @@ class Package(TimeStampedModel):
                     default=Status.ACTIVE,
                     db_index=True,
                 )
-    
-    max_difficulty = models.CharField(
-        max_length=12,
-        choices=MaxDifficulty.choices,
-        default=MaxDifficulty.ADVANCED,
-        db_index=True,
-        help_text="Maximum course difficulty level accessible under this package."
-    )
 
-    price          = models.DecimalField(max_digits=8, decimal_places=2, help_text="Current price e.g. 9.99")
-    original_price = models.DecimalField(
-                        max_digits=8, decimal_places=2,
-                        null=True, blank=True,
-                        help_text="Pre-discount price shown as strikethrough."
-                    )
-    currency       = models.CharField(max_length=3, default="USD", help_text="ISO 4217 code e.g. USD, GHS")
+    # ── Pricing ───────────────────────────────────────────
+    price          = models.DecimalField(max_digits=8, decimal_places=2)
+    original_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    currency       = models.CharField(max_length=3, default="USD")
     billing_cycle  = models.CharField(
                         max_length=10,
                         choices=BillingCycle.choices,
                         default=BillingCycle.MONTHLY,
                         db_index=True,
                     )
-    trial_days     = models.PositiveIntegerField(default=0, help_text="Free trial days. 0 means no trial.")
+    trial_days     = models.PositiveIntegerField(default=0)
 
-    is_unlimited = models.BooleanField(default=False, help_text="Grants access to all active courses.")
-    max_courses  = models.PositiveIntegerField(
-                    null=True, blank=True,
-                    help_text="Max courses student can enrol in. Null means unlimited."
-                )
-    subjects     = models.ManyToManyField(
-                    "subjects.Subject",
-                    blank=True,
-                    related_name="packages",
-                    help_text="Subjects accessible under this package. Empty means all."
-                )
-    max_students = models.PositiveIntegerField(
-                    null=True, blank=True,
-                    help_text="For institution plans. Null means single student."
+    # ── Content Access ────────────────────────────────────
+    is_unlimited = models.BooleanField(
+                    default=False,
+                    help_text="Grants unlimited access to ALL courses at ALL levels."
                 )
 
-    ai_credits_per_month   = models.PositiveIntegerField(
-                                default=0,
-                                help_text="AI generation requests per month. 0 means no AI access."
+    # ✅ The ceiling difficulty level for this package
+    max_difficulty = models.CharField(
+                        max_length=12,
+                        choices=MaxDifficulty.choices,
+                        default=MaxDifficulty.BEGINNER,
+                        db_index=True,
+                        help_text="The highest difficulty level this package can access."
+                    )
+
+    # ✅ Renamed from max_courses — limit only applies AT the ceiling level
+    # Courses BELOW the ceiling are always unlimited
+    # null = unlimited at ceiling level too (used for Unlimited plan)
+    max_courses_at_level = models.PositiveIntegerField(
+                            null=True,
+                            blank=True,
+                            help_text=(
+                                "Maximum courses allowed AT the ceiling difficulty level. "
+                                "Courses below the ceiling are always unlimited. "
+                                "Null means unlimited at ceiling too."
                             )
-    ai_question_generation = models.BooleanField(
-                                default=False,
-                                help_text="Can generate custom practice questions using AI."
+                        )
+
+    max_students = models.PositiveIntegerField(null=True, blank=True)
+
+    # ── AI Features ───────────────────────────────────────
+    ai_credits_per_month   = models.PositiveIntegerField(default=0)
+    ai_question_generation = models.BooleanField(default=False)
+    ai_explanations        = models.BooleanField(default=False)
+
+    # ── Video & Audio ─────────────────────────────────────
+    includes_video_lessons  = models.BooleanField(default=False)
+    video_quality           = models.CharField(
+                                max_length=5,
+                                choices=VideoQuality.choices,
+                                default=VideoQuality.SD,
+                                blank=True,
                             )
-    ai_explanations        = models.BooleanField(
-                                default=False,
-                                help_text="Gets AI-powered explanations for incorrect answers."
-                            )
+    text_to_audio           = models.BooleanField(default=False)
+    audio_to_text           = models.BooleanField(default=False)
+    audio_minutes_per_month = models.PositiveIntegerField(default=0)
 
-    includes_certificate   = models.BooleanField(default=False, help_text="Awards certificate on course completion.")
-    can_download_materials = models.BooleanField(default=False, help_text="Can download materials for offline use.")
+    # ── Features ──────────────────────────────────────────
+    includes_certificate   = models.BooleanField(default=False)
+    can_download_materials = models.BooleanField(default=False)
 
-    is_featured   = models.BooleanField(default=True, help_text="Highlights package on pricing page.")
-    badge_text    = models.CharField(max_length=50, blank=True, default="", help_text="e.g. 'Most Popular'.")
-    display_order = models.PositiveIntegerField(default=0, help_text="Display order on pricing page.")
-    
-    includes_video_lessons = models.BooleanField(
-        default=False,
-        help_text="Whether this package includes video lessons."
-    )
+    # ── Marketing ─────────────────────────────────────────
+    is_featured   = models.BooleanField(default=False)
+    badge_text    = models.CharField(max_length=50, blank=True, default="")
+    display_order = models.PositiveIntegerField(default=0)
 
-
-    video_quality = models.CharField(
-        max_length=5,
-        choices=VideoQuality.choices,
-        default=VideoQuality.SD,
-        blank=True,
-        help_text="Maximum video quality available under this package."
-    )
-    
-    text_to_audio = models.BooleanField(
-        default=False,
-        help_text="Students can listen to module content read aloud."
-    )
-
-    audio_to_text = models.BooleanField(
-        default=False,
-        help_text="Students can ask questions using their voice."
-    )
-
-    audio_minutes_per_month = models.PositiveIntegerField(
-        default=0,
-        help_text="Monthly audio processing minutes. 0 means no audio access."
-    )
+    # ── Subjects restriction ──────────────────────────────
+    subjects = models.ManyToManyField(
+                "subjects.Subject",
+                blank=True,
+                related_name="packages",
+            )
 
     class Meta:
         ordering        = ["display_order", "price"]
@@ -146,13 +128,10 @@ class Package(TimeStampedModel):
 
     @property
     def has_discount(self) -> bool:
-        """True if this package has an active discount."""
         return self.original_price is not None and self.original_price > self.price
- 
 
     @property
     def discount_percentage(self) -> int | None:
-        """Returns the discount percentage if a discount exists."""
         if not self.has_discount:
             return None
         return int(((self.original_price - self.price) / self.original_price) * 100)
@@ -163,8 +142,7 @@ class Package(TimeStampedModel):
 
     @property
     def has_ai_access(self) -> bool:
-        return self.ai_credits_per_month > 0
-    
+        return self.ai_credits_per_month > 0  
     
     
     

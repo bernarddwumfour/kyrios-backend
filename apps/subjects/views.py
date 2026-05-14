@@ -15,6 +15,7 @@ from django.utils import timezone
 from .utils import serialize_registration,serialize_purchase,serialize_progress
 from apps.packages.models import Subscription
 from .access import get_course_access
+from .prerequisites import get_all_prerequisites
 
 # ─────────────────────────────────────────
 # SUBJECTS
@@ -310,6 +311,8 @@ def bulk_subject_action(request):
 # ─────────────────────────────────────────
 # COURSES
 # ─────────────────────────────────────────
+# courses/views.py — create and update only
+
 @csrf_exempt
 @jwt_required
 @admin_required
@@ -324,7 +327,12 @@ def create_course(request):
     except json.JSONDecodeError:
         return bad_request("Invalid JSON body")
 
-    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration", "price"}
+    # ✅ prerequisites and requirements added to allowed fields
+    allowed_fields  = {
+        "name", "description", "status", "difficulty",
+        "subject", "duration", "price",
+        "prerequisites", "requirements",
+    }
     required_fields = {"name", "difficulty", "subject"}
     received_fields = set(data.keys())
 
@@ -360,7 +368,19 @@ def create_course(request):
             if price <= 0:
                 raise ValueError
         except (ValueError, TypeError):
-            return bad_request("Price must be a positive number e.g. 9.99")
+            return bad_request("Price must be a positive number")
+
+    # ✅ Validate requirements — must be a list of strings
+    requirements = data.get("requirements", [])
+    if not isinstance(requirements, list):
+        return bad_request("requirements must be an array of strings")
+    if not all(isinstance(r, str) for r in requirements):
+        return bad_request("Each requirement must be a string")
+
+    # ✅ Validate prerequisites — list of course IDs
+    prerequisite_ids = data.get("prerequisites", [])
+    if not isinstance(prerequisite_ids, list):
+        return bad_request("prerequisites must be an array of course IDs")
 
     try:
         subject = Subject.objects.get(id=data["subject"])
@@ -372,23 +392,152 @@ def create_course(request):
     course, created = Course.objects.get_or_create(
         name=data["name"].strip(),
         defaults={
-            "description": data.get("description", "").strip(),
-            "status":      status,
-            "difficulty":  difficulty,
-            "subject":     subject,
-            "duration":    duration,
-            "price":       price,          
+            "description":  data.get("description", "").strip(),
+            "status":       status,
+            "difficulty":   difficulty,
+            "subject":      subject,
+            "duration":     duration,
+            "price":        price,
+            "requirements": requirements,
         }
     )
 
     if not created:
         return bad_request("A course with this name already exists")
 
-    course = Course.objects.select_related("subject") \
-                           .prefetch_related("modules") \
-                           .get(id=course.id)
+    # ✅ Set prerequisites after creation (M2M)
+    if prerequisite_ids:
+        valid_prereqs = Course.objects.filter(
+            id__in=prerequisite_ids
+        ).exclude(id=course.id)  # can't be its own prerequisite
+
+        if valid_prereqs.count() != len(prerequisite_ids):
+            # Some IDs were invalid — still save what we found
+            pass
+
+        course.prerequisites.set(valid_prereqs)
+
+    course = Course.objects.select_related("subject").prefetch_related("prerequisites").get(id=course.id)
 
     return ok(data=serialize_course(course, is_admin=True), message="Course created successfully")
+
+
+@csrf_exempt
+@jwt_required
+@admin_required
+@require_http_methods(["PATCH"])
+def update_course(request, id):
+
+    try:
+        course = Course.objects.select_related("subject").prefetch_related("prerequisites").get(id=id)
+        
+    except Course.DoesNotExist:
+        return bad_request("Course not found")
+    except Exception:
+        return bad_request("Invalid course ID format")
+
+    if request.content_type != "application/json":
+        return bad_request("Content-Type must be application/json")
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return bad_request("Invalid request body")
+
+    allowed_fields = {
+        "name", "description", "status", "difficulty",
+        "subject", "duration", "price",
+        "prerequisites", "requirements",
+    }
+
+    extra = set(data.keys()) - allowed_fields
+    if extra:
+        return bad_request(f"Unexpected fields not allowed: {', '.join(extra)}")
+
+    if not data:
+        return bad_request("No fields provided to update")
+
+    if "name" in data:
+        name = data["name"].strip()
+        if not name:
+            return bad_request("Name cannot be blank")
+        if Course.objects.exclude(id=id).filter(name=name).exists():
+            return bad_request("A course with this name already exists")
+        course.name = name
+        course.slug = slugify(name)
+
+    if "description" in data:
+        course.description = data["description"].strip()
+
+    if "status" in data:
+        if data["status"] not in Course.Status.values:
+            return bad_request(f"Status must be one of: {Course.Status.values}")
+        course.status = data["status"]
+
+    if "difficulty" in data:
+        if data["difficulty"] not in Course.Difficulty.values:
+            return bad_request(f"Difficulty must be one of: {Course.Difficulty.values}")
+        course.difficulty = data["difficulty"]
+
+    if "duration" in data:
+        duration = data["duration"]
+        if duration is not None:
+            try:
+                duration = int(duration)
+                if duration <= 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return bad_request("Duration must be a positive integer")
+        course.duration = duration
+
+    if "price" in data:
+        price = data["price"]
+        if price is None:
+            course.price = None
+        else:
+            try:
+                price = float(price)
+                if price <= 0:
+                    raise ValueError
+                course.price = price
+            except (ValueError, TypeError):
+                return bad_request("Price must be a positive number")
+
+    # ✅ Update requirements
+    if "requirements" in data:
+        requirements = data["requirements"]
+        if not isinstance(requirements, list):
+            return bad_request("requirements must be an array of strings")
+        if not all(isinstance(r, str) for r in requirements):
+            return bad_request("Each requirement must be a string")
+        course.requirements = requirements
+
+    if "subject" in data:
+        try:
+            course.subject = Subject.objects.get(id=data["subject"])
+        except Subject.DoesNotExist:
+            return bad_request("Provided subject does not exist")
+        except Exception:
+            return bad_request("Invalid subject ID format")
+
+    course.save()
+
+    # ✅ Update prerequisites (M2M — done after save)
+    if "prerequisites" in data:
+        prerequisite_ids = data["prerequisites"]
+        if not isinstance(prerequisite_ids, list):
+            return bad_request("prerequisites must be an array of course IDs")
+
+        valid_prereqs = Course.objects.filter(
+            id__in=prerequisite_ids
+        ).exclude(id=id)  # can't be its own prerequisite
+
+        course.prerequisites.set(valid_prereqs)
+
+    course = Course.objects.select_related("subject").prefetch_related("prerequisites").get(id=course.id)
+
+    return ok(data=serialize_course(course, is_admin=True), message="Course updated successfully")
+
 
 
 @csrf_exempt
@@ -436,6 +585,9 @@ def list_courses(request):
 
     paginator = Paginator(queryset, page_size)
     page      = paginator.get_page(page_number)
+    
+    print("hereeee")
+    
 
     return ok(
         data={
@@ -487,101 +639,6 @@ def course_detail(request, id):
         ),
         message="Course retrieved successfully"
     )
-
-
-@csrf_exempt
-@jwt_required
-@admin_required
-@require_http_methods(["PATCH"])
-def update_course(request, id):
-
-    try:
-        course = Course.objects.select_related("subject").get(id=id)
-    except Course.DoesNotExist:
-        return bad_request("Course not found")
-    except Exception:
-        return bad_request("Invalid course ID format")
-
-    if request.content_type != "application/json":
-        return bad_request("Content-Type must be application/json")
-
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return bad_request("Invalid request body")
-
-    allowed_fields  = {"name", "description", "status", "difficulty", "subject", "duration", "price"}
-    received_fields = set(data.keys())
-
-    extra = received_fields - allowed_fields
-    if extra:
-        return bad_request(f"Unexpected fields not allowed: {', '.join(extra)}")
-
-    if not data:
-        return bad_request("No fields provided to update")
-
-    if "name" in data:
-        name = data["name"].strip()
-        if not name:
-            return bad_request("Name cannot be blank")
-        if Course.objects.exclude(id=id).filter(name=name).exists():
-            return bad_request("A course with this name already exists")
-        course.name = name
-        course.slug = slugify(name)
-
-    if "description" in data:
-        course.description = data["description"].strip()
-
-    if "status" in data:
-        status = data["status"]
-        if not isinstance(status, str) or status.strip() not in Course.Status.values:
-            return bad_request(f"Status must be one of: {Course.Status.values}")
-        course.status = status.strip()
-
-    if "difficulty" in data:
-        difficulty = data["difficulty"]
-        if difficulty not in Course.Difficulty.values:
-            return bad_request(f"Difficulty must be one of: {Course.Difficulty.values}")
-        course.difficulty = difficulty
-
-    if "duration" in data:
-        duration = data["duration"]
-        if duration is not None:
-            try:
-                duration = int(duration)
-                if duration <= 0:
-                    raise ValueError
-            except (ValueError, TypeError):
-                return bad_request("Duration must be a positive integer (minutes)")
-        course.duration = duration
-
-    if "price" in data:
-        price = data["price"]
-        if price is None:
-            course.price = None
-        else:
-            try:
-                price = float(price)
-                if price <= 0:
-                    raise ValueError
-                course.price = price
-            except (ValueError, TypeError):
-                return bad_request("Price must be a positive number e.g. 9.99")
-
-    if "subject" in data:
-        try:
-            new_subject = Subject.objects.get(id=data["subject"])
-        except Subject.DoesNotExist:
-            return bad_request("Provided subject does not exist")
-        except Exception:
-            return bad_request("Invalid subject ID format")
-        course.subject = new_subject
-
-    course.save()
-
-    course = Course.objects.select_related("subject").get(id=course.id)
-
-    return ok(data=serialize_course(course, is_admin=True), message="Course updated successfully")
 
 
 @csrf_exempt
@@ -998,69 +1055,94 @@ def admin_list_registrations(request):
 @require_http_methods(["POST"])
 def purchase_course(request):
     """
-    One-time course purchase.
+    Two modes via 'confirm' flag:
 
-    1. Validates course is purchasable
-    2. Checks not already purchased
-    3. Creates purchase
-    4. If student had subscription registration for this course,
-       automatically frees the subscription slot
-    5. Progress is untouched — carries over
+    confirm=false (default):
+        → Validate the purchase
+        → Return upsell options if available
+        → Don't charge yet
+
+    confirm=true:
+        → User has seen upsell and decided to proceed
+        → Complete the purchase
     """
-    
-    print("hereeee")
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
         return bad_request("Invalid request body")
 
-    # 1. Validate course_id
     course_id = data.get("course_id", "").strip()
     if not course_id:
         return bad_request("course_id is required")
 
     try:
-        course = Course.objects.get(id=course_id)
+        course = Course.objects.select_related("subject").prefetch_related(
+                                   "prerequisites",
+                                   "prerequisites__subject",
+                                   "prerequisites__prerequisites",
+                                   "unlocks",
+                                   "unlocks__prerequisites",
+                                   "unlocks__subject",
+                               ).get(id=course_id)
     except Course.DoesNotExist:
         return bad_request("Course not found")
     except Exception:
         return bad_request("Invalid course ID format")
 
-    # 2. Check course is purchasable
     if not course.is_purchasable:
         return bad_request("This course is not available for purchase")
 
-    # 3. Check not already purchased
     already_purchased = CoursePurchase.objects.filter(
         user=request.user,
         course=course,
     ).exists()
 
     if already_purchased:
-        return bad_request(
-            "You have already purchased this course. "
-            "Check your purchased courses."
+        return bad_request("You have already purchased this course")
+
+    # ── Step 1: Check upsell options ──────────────────────
+    # If confirm=false (default), return upsell info before charging
+    confirm = str(data.get("confirm", "false")).lower() == "true"
+
+    from .upsell import get_upsell_options
+    upsell_options = get_upsell_options(course, request.user)
+
+    if not confirm and upsell_options:
+        # Return upsell options — let user decide before proceeding
+        return ok(
+            data={
+                "course": {
+                    "id":         str(course.id),
+                    "name":       course.name,
+                    "price":      str(course.price),
+                    "difficulty": course.difficulty,
+                },
+                "upsell_options":  upsell_options,
+                "confirm_required": True,
+                "message": (
+                    f"Before purchasing '{course.name}', you may want to consider "
+                    f"one of these options that include it."
+                ),
+            },
+            message=f"'{course.name}' is included in other courses. Review your options below."
         )
 
-    # 4. Validate payment reference
+    # ── Step 2: Validate payment reference ────────────────
     payment_reference = data.get("payment_reference", "").strip()
     if not payment_reference:
         return bad_request("payment_reference is required")
 
-    # 5. Create purchase + free subscription slot if applicable
+    # ── Step 3: Complete purchase ─────────────────────────
     with transaction.atomic():
 
-        # Create the purchase
         purchase = CoursePurchase.objects.create(
             user=request.user,
             course=course,
-            price_paid=course.price,      # snapshot current price
+            price_paid=course.price,
             payment_reference=payment_reference,
         )
 
-        # ✅ Free subscription slot if student was accessing
-        # this course via subscription
         freed_slot = False
         existing_registration = CourseRegistration.objects.filter(
             user=request.user,
@@ -1069,26 +1151,93 @@ def purchase_course(request):
         ).first()
 
         if existing_registration:
-            # Delete the registration — slot is now free
             existing_registration.delete()
             freed_slot = True
 
-        # ✅ Ensure CourseProgress exists — preserves any existing progress
         CourseProgress.objects.get_or_create(
             user=request.user,
             course=course,
             defaults={"progress": 0}
         )
 
+        all_prerequisites = get_all_prerequisites(course)
+        newly_granted     = []
+        already_owned     = []
+
+        for prereq in all_prerequisites:
+
+            prereq_purchase, prereq_created = CoursePurchase.objects.get_or_create(
+                user=request.user,
+                course=prereq,
+                defaults={
+                    "price_paid":        0,
+                    "payment_reference": f"prereq-of-{str(purchase.id)}",
+                }
+            )
+
+            if prereq_created:
+                CourseRegistration.objects.filter(
+                    user=request.user,
+                    course=prereq,
+                    status=CourseRegistration.Status.ACTIVE,
+                ).delete()
+
+                CourseProgress.objects.get_or_create(
+                    user=request.user,
+                    course=prereq,
+                    defaults={"progress": 0}
+                )
+
+                newly_granted.append({
+                    "id":          str(prereq.id),
+                    "name":        prereq.name,
+                    "slug":        prereq.slug,
+                    "difficulty":  prereq.difficulty,
+                    "subject":     prereq.subject.name,
+                    "purchase_id": str(prereq_purchase.id),
+                    "price_paid":  "0.00",
+                    "granted_by":  str(purchase.id),
+                })
+            else:
+                already_owned.append({
+                    "id":          str(prereq.id),
+                    "name":        prereq.name,
+                    "slug":        prereq.slug,
+                    "difficulty":  prereq.difficulty,
+                    "purchase_id": str(prereq_purchase.id),
+                })
+
+    # ── Build response message ────────────────────────────
+    message_parts = [f"Successfully purchased '{course.name}'."]
+
+    if newly_granted:
+        names = ", ".join(f"'{p['name']}'" for p in newly_granted)
+        message_parts.append(
+            f"Access to {len(newly_granted)} prerequisite(s) granted: {names}."
+        )
+
+    if already_owned:
+        names = ", ".join(f"'{p['name']}'" for p in already_owned)
+        message_parts.append(
+            f"You already owned {len(already_owned)} prerequisite(s): {names}."
+        )
+
+    if freed_slot:
+        message_parts.append("A subscription slot has been freed.")
+
     return ok(
         data={
-            **serialize_purchase(purchase),
-            "slot_freed": freed_slot,
+            "purchase":     serialize_purchase(purchase),
+            "slot_freed":   freed_slot,
+            "prerequisites": {
+                "newly_granted": newly_granted,
+                "already_owned": already_owned,
+                "total_count":   len(all_prerequisites),
+            },
+          
+            "other_options": upsell_options if upsell_options else [],
         },
-        message=(
-            f"Successfully purchased '{course.name}'. "
-            + ("A subscription slot has been freed." if freed_slot else "")
-        ).strip()
+        message=" ".join(message_parts)
     )
 
 

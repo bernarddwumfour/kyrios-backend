@@ -1,4 +1,5 @@
 # courses/utils.py
+# courses/utils.py
 
 def serialize_course(course, include_modules=False, is_admin=False, user=None) -> dict:
     data = {
@@ -11,12 +12,28 @@ def serialize_course(course, include_modules=False, is_admin=False, user=None) -
             "name": course.subject.name,
             "slug": course.subject.slug,
         },
-        "difficulty":      course.difficulty,
-        "duration":        course.duration,
-        "status":          course.status,
+        "difficulty":     course.difficulty,
+        "duration":       course.duration,
+        "status":         course.status,
+        # "module_count":   course.modules.count(),
+        "price":          str(course.price) if course.price is not None else None,
+        "is_purchasable": course.is_purchasable,
+        "requirements":   course.requirements,
+        "prerequisites_count":   course.prerequisites.count(),
 
-        "price":           str(course.price) if course.price is not None else None,
-        "is_purchasable":  course.is_purchasable,
+
+        # Suggested prerequisites
+        "prerequisites": [
+            {
+                "id":             str(p.id),
+                "name":           p.name,
+                "slug":           p.slug,
+                "difficulty":     p.difficulty,
+                "is_purchasable": p.is_purchasable,
+                "price":          str(p.price) if p.price else None,
+            }
+            for p in course.prerequisites.all()
+        ],
     }
 
     if is_admin:
@@ -26,17 +43,16 @@ def serialize_course(course, include_modules=False, is_admin=False, user=None) -
     if user and user.is_authenticated:
         from .access import get_course_access
         from .models import CourseProgress
+        from .upsell import get_upsell_options
 
         access = get_course_access(user, course)
-
-        # Get progress if it exists
         progress_record = CourseProgress.objects.filter(
             user=user, course=course
         ).first()
 
         data["user_access"] = {
             "has_access":    access["has_access"],
-            "access_type":   access["access_type"],     # "purchase" | "subscription" | None
+            "access_type":   access["access_type"],
             "is_purchased":  access["is_purchased"],
             "is_registered": access["is_registered"],
             "progress":      progress_record.progress if progress_record else 0,
@@ -44,24 +60,31 @@ def serialize_course(course, include_modules=False, is_admin=False, user=None) -
             "completed_at":  progress_record.completed_at.isoformat() if progress_record and progress_record.completed_at else None,
         }
 
-    # if include_modules:
-    #     data["modules"] = [
-    #         {
-    #             "id":          str(m.id),
-    #             "name":        m.name,
-    #             "slug":        m.slug,
-    #             "description": m.description,
-    #             "order":       m.order,
-    #             **({"status":     m.status,
-    #                 "created_at": m.created_at.isoformat(),
-    #                 "updated_at": m.updated_at.isoformat(),
-    #                 } if is_admin else {}),
-    #         }
-    #         for m in course.modules.all()
-    #         if is_admin or m.status == "active"
-    #     ]
+        
+        if not access["has_access"] and course.is_purchasable:
+            data["upsell_options"] = get_upsell_options(course, user)
+        else:
+            data["upsell_options"] = []
+
+    if include_modules:
+        data["modules"] = [
+            {
+                "id":          str(m.id),
+                "name":        m.name,
+                "slug":        m.slug,
+                "description": m.description,
+                "order":       m.order,
+                **({"status":     m.status,
+                    "created_at": m.created_at.isoformat(),
+                    } if is_admin else {}),
+            }
+            for m in course.modules.all()
+            if is_admin or m.status == "active"
+        ]
 
     return data
+
+
 
 
 def serialize_subject(subject, include_courses=False, is_admin=False) -> dict:
@@ -192,3 +215,5 @@ def serialize_progress(progress) -> dict:
         "completed_at": progress.completed_at.isoformat() if progress.completed_at else None,
         "updated_at":   progress.updated_at.isoformat(),
     }
+    
+    

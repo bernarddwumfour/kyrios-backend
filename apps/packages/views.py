@@ -62,6 +62,9 @@ def create_package(request):
     max_difficulty = data.get("max_difficulty", Package.MaxDifficulty.ADVANCED)
     if max_difficulty not in Package.MaxDifficulty.values:
         return bad_request(f"Invalid max_difficulty. Must be one of: {Package.MaxDifficulty.values}")
+    
+  
+
 
     package, created = Package.objects.get_or_create(
         name=data["name"].strip(),
@@ -77,6 +80,7 @@ def create_package(request):
             "max_courses":            data.get("max_courses"),
             "max_difficulty":         data.get("max_difficulty", Package.MaxDifficulty.ADVANCED),
             "max_students":           data.get("max_students"),
+            "max_courses_at_level":   int (data.get("max_courses_at_level",3)),
             "includes_certificate":   bool(data.get("includes_certificate", False)),
             "can_download_materials": bool(data.get("can_download_materials", False)),
             "includes_video_lessons": bool(data.get("includes_video_lessons", False)),
@@ -125,6 +129,9 @@ def list_packages(request):
 
     paginator = Paginator(queryset, page_size)
     page      = paginator.get_page(page_number)
+    
+    print("here")
+    
 
     return ok(
         data={
@@ -245,7 +252,7 @@ def update_package(request, id):
         package.max_difficulty = data["max_difficulty"]
 
     # Numeric fields
-    for field in ["trial_days", "max_courses", "max_students",
+    for field in ["trial_days", "max_courses_at_level", "max_students",
                   "audio_minutes_per_month", "ai_credits_per_month", "display_order"]:
         if field in data:
             val = data[field]
