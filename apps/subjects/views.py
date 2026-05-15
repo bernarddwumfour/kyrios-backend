@@ -16,7 +16,7 @@ from .utils import serialize_registration,serialize_purchase,serialize_progress
 from apps.packages.models import Subscription
 from .access import get_course_access
 from .prerequisites import get_all_prerequisites
-
+from .registration import validate_and_register
 # ─────────────────────────────────────────
 # SUBJECTS
 # ─────────────────────────────────────────
@@ -781,91 +781,6 @@ def bulk_course_action(request):
             )
             
         
-
-
-def validate_and_register(user, course, subscription) -> tuple[CourseRegistration | None, str | None]:
-    """
-    Validates all package restrictions then creates a registration.
-    Returns (registration, None) on success.
-    Returns (None, error_message) on failure.
-
-    Checks in order:
-    1. Subscription is active
-    2. Course is active
-    3. Already registered
-    4. Difficulty level allowed by package
-    5. Course limit not exceeded
-    6. Subject accessible under package
-    """
-    
-
-    package = subscription.package
-
-    if not subscription.is_active:
-        return None, "Your subscription is not active"
-
-    if course.status != Course.Status.ACTIVE:
-        return None, "This course is not available"
-
-    already_registered = CourseRegistration.objects.filter(
-        user=user,
-        course=course,
-        status=CourseRegistration.Status.ACTIVE,
-    ).exists()
-
-    if already_registered:
-        return None, "You are already registered for this course"
-
-
-    course_level  = DIFFICULTY_HIERARCHY.get(course.difficulty, 0)
-    allowed_level = DIFFICULTY_HIERARCHY.get(package.max_difficulty, 0)
-
-    if course_level > allowed_level:
-        return None, (
-            f"Your '{package.name}' package only allows up to "
-            f"'{package.get_max_difficulty_display()}' courses. "
-            f"This course is '{course.get_difficulty_display()}'. "
-            f"Upgrade your package to access this course."
-        )
-
-    if not package.is_unlimited and package.max_courses is not None:
-        current_count = CourseRegistration.objects.filter(
-            user=user,
-            subscription=subscription,
-            status__in=[
-                CourseRegistration.Status.ACTIVE,
-                CourseRegistration.Status.COMPLETED,
-            ]
-        ).count()
-
-        if current_count >= package.max_courses:
-            return None, (
-                f"Your '{package.name}' package allows a maximum of "
-                f"{package.max_courses} course(s). "
-                f"You have registered for {current_count}. "
-                f"Drop a course or upgrade your package."
-            )
-            
-    
-
-    if package.subjects.exists():
-        allowed_subjects = package.subjects.values_list("id", flat=True)
-        if course.subject_id not in allowed_subjects:
-            return None, (
-                f"Your '{package.name}' package does not include "
-                f"the '{course.subject.name}' subject. "
-                f"Upgrade your package to access this course."
-            )
-
-    with transaction.atomic():
-        registration = CourseRegistration.objects.create(
-            user=user,
-            course=course,
-            subscription=subscription,
-        )
-
-    return registration, None
-
 
 
 @csrf_exempt
